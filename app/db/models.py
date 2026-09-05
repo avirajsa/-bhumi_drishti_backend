@@ -27,6 +27,7 @@ class RoadSegment(Base):
     features = relationship("SegmentFeature", back_populates="segment", uselist=False, cascade="all, delete-orphan")
     risk = relationship("SegmentRisk", back_populates="segment", uselist=False, cascade="all, delete-orphan")
     incidents = relationship("HistoricalIncident", back_populates="segment", cascade="all, delete-orphan")
+    reports = relationship("FieldReport", back_populates="segment")
 
 
 class SegmentFeature(Base):
@@ -107,3 +108,25 @@ class HistoricalIncident(Base):
 
     # Relationship back to segment
     segment = relationship("RoadSegment", back_populates="incidents")
+
+
+class FieldReport(Base):
+    __tablename__ = "field_reports"
+
+    report_id = Column(Integer, primary_key=True, autoincrement=True)
+    segment_id = Column(Integer, ForeignKey("road_segments.segment_id", ondelete="SET NULL"), nullable=True, index=True)
+    reporter_name = Column(String, default="Field Responder", nullable=False)
+    reporter_role = Column(String, default="Patrol Officer", nullable=False)  # Patrol Officer, Citizen, Engineer
+    report_type = Column(String, nullable=False, index=True)  # flood, landslide, road_damage, blockage
+    severity = Column(Float, default=0.5, nullable=False)
+    status = Column(String, default="SUBMITTED", nullable=False, index=True)  # SUBMITTED, UNDER_REVIEW, VERIFIED, RESOLVED
+    description = Column(String, nullable=True)
+    photo_url = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Point geometry in EPSG:4326 with automatic GiST spatial index
+    geom = Column(Geometry("POINT", srid=4326, spatial_index=True), nullable=True)
+
+    # Relationship back to segment
+    segment = relationship("RoadSegment", back_populates="reports")

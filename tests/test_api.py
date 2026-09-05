@@ -84,20 +84,39 @@ def test_get_segment_risk(client):
     assert "hazards" in data
 
 
-def test_field_report_submission_escalates_risk(client):
+def test_field_report_crud_and_status_workflow(client):
+    # 1. Create a field report with GPS coordinates
     report_payload = {
         "segment_id": 1,
         "report_type": "landslide",
-        "reporter_name": "NER Disaster Response Patrol",
-        "comment": "Active mudslide blocking left lane on GS road"
+        "severity": 0.85,
+        "reporter_name": "Patrol Officer Sharma",
+        "reporter_role": "Patrol Officer",
+        "description": "Active rockfall blocking right lane on GS Road",
+        "latitude": 26.14,
+        "longitude": 91.73
     }
 
-    response = client.post("/api/v1/reports", json=report_payload)
-    assert response.status_code == 200
-    data = response.json()
+    create_resp = client.post("/api/v1/reports", json=report_payload)
+    assert create_resp.status_code == 200
+    report_data = create_resp.json()
+    
+    assert report_data["segment_id"] == 1
+    assert report_data["report_type"] == "landslide"
+    assert report_data["status"] == "SUBMITTED"
+    report_id = report_data["report_id"]
 
-    assert data["segment_id"] == 1
-    assert data["report_type"] == "landslide"
+    # 2. List dashboard field reports
+    list_resp = client.get("/api/v1/reports?status=SUBMITTED")
+    assert list_resp.status_code == 200
+    list_data = list_resp.json()
+    assert list_data["total_count"] > 0
+    assert any(r["report_id"] == report_id for r in list_data["reports"])
+
+    # 3. Update report status to VERIFIED
+    patch_resp = client.patch(f"/api/v1/reports/{report_id}/status", json={"status": "VERIFIED"})
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["status"] == "VERIFIED"
 
 
 def test_ml_risk_prediction(client):

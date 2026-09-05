@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from app.db.database import engine, Base
-from app.db.models import RoadSegment, SegmentFeature, SegmentRisk, HistoricalIncident  # noqa: F401
+from app.db.models import RoadSegment, SegmentFeature, SegmentRisk, HistoricalIncident, FieldReport  # noqa: F401
 from app.api.segments import router as segments_router
 from app.api.features import router as features_router
 from app.api.reports import router as reports_router
@@ -22,7 +22,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Road Risk & Accessibility System — Backend Prototype",
     description="GIS Road Risk & Accessibility backend with feature vectors, Open-Meteo weather sync, field reporting, & ML prediction pipeline for North Eastern Region (NER) of India",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 

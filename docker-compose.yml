@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: road_risk_db
+    restart: always
+    environment:
+      POSTGRES_DB: road_risk
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d road_risk"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: road_risk_app
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/road_risk
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      RUN_POPULATE_ON_STARTUP: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  weather-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: road_risk_weather_worker
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/road_risk
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      RUN_POPULATE_ON_STARTUP: "false"
+    command: ["sh", "-c", "while true; do python scripts/sync_weather.py; sleep 3600; done"]
+    depends_on:
+      app:
+        condition: service_started
+
+volumes:
+  pgdata:
+    driver: local

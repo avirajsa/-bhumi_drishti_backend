@@ -123,6 +123,44 @@ class HistoricalIncidentResponse(BaseModel):
     occurred_at: str
 
 
+# Dashboard Field Report Models
+class FieldReportCreateRequest(BaseModel):
+    segment_id: Optional[int] = Field(None, description="Target road segment ID (optional if lat/lon provided)")
+    report_type: str = Field(..., description="Report type: 'flood', 'landslide', 'road_damage', or 'blockage'")
+    severity: float = Field(0.5, ge=0.0, le=1.0, description="Severity score 0.0 to 1.0")
+    reporter_name: Optional[str] = Field("Field Responder", description="Name/organization of reporter")
+    reporter_role: Optional[str] = Field("Patrol Officer", description="Role: 'Patrol Officer', 'Citizen', 'Engineer'")
+    description: Optional[str] = Field(None, description="Observation details")
+    photo_url: Optional[str] = Field(None, description="URL of photo attachment")
+    latitude: Optional[float] = Field(None, description="GPS latitude (e.g. 26.14)")
+    longitude: Optional[float] = Field(None, description="GPS longitude (e.g. 91.73)")
+
+
+class FieldReportStatusUpdate(BaseModel):
+    status: str = Field(..., description="New status: 'SUBMITTED', 'UNDER_REVIEW', 'VERIFIED', 'RESOLVED'")
+
+
+class FieldReportResponse(BaseModel):
+    report_id: int
+    segment_id: Optional[int] = None
+    reporter_name: str
+    reporter_role: str
+    report_type: str
+    severity: float
+    status: str
+    description: Optional[str] = None
+    photo_url: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    created_at: str
+    updated_at: str
+
+
+class FieldReportListResponse(BaseModel):
+    total_count: int
+    reports: List[FieldReportResponse]
+
+
 # Enhanced Segment Properties for GeoJSON Feature Output
 class SegmentProperties(BaseModel):
     segment_id: int

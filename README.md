@@ -26,6 +26,7 @@ Built with **Python, FastAPI, PostgreSQL, PostGIS, XGBoost, Scikit-Learn, SQLAlc
 └───────────────────────────┘         │ - segment_features           │         └──────────────────────────────┘
                                       │ - segment_risks              │
                                       │ - historical_incidents       │
+                                      │ - field_reports              │
                                       └──────────────┬───────────────┘
                                                      │
                                                      ▼
@@ -77,70 +78,72 @@ Built with **Python, FastAPI, PostgreSQL, PostGIS, XGBoost, Scikit-Learn, SQLAlc
 
 ---
 
-## Data Models Summary
+## Production Deployment Guide (Docker & Cloud)
 
-### 1. `road_segments`
-Base geographic segment record.
-- `segment_id` (PK, Int), `osm_way_id` (BigInt, Indexed), `road_type`, `lanes`, `surface`, `bridge`, `oneway`, `maxspeed`, `name`, `ref`, `length_m`, `geom` (Geometry LineString 4326, GiST Indexed).
+### Method A: Docker Compose Deployment (Recommended)
 
-### 2. `segment_features`
-Multi-dimensional feature vector linked to `road_segments(segment_id)`.
-- Elevation, slope, roughness, river/stream distance, flood zone flag, 1h/6h/24h/72h rainfall, 1y historical event counts, 30d damage reports, construction flag, congestion ratio, 24h field report counts.
+To deploy the complete stack (PostGIS + FastAPI + IMD Weather Sync Worker) on any server or VPS:
 
-### 3. `segment_risks`
-Calculated rule-based risk metrics.
-- `segment_id` (PK, FK), `overall_blockage_risk` (0.0 to 1.0), `risk_category` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), `hazard_flood`, `hazard_landslide`, `hazard_road_damage`, `hazard_congestion`.
+```bash
+# 1. Clone repository
+git clone https://github.com/Samriddha0207/helper_dashboard.git
+cd backend2
 
-### 4. `historical_incidents`
-Ground-truth historical disaster events for ML training.
-- `incident_id` (PK, Int), `segment_id` (FK), `incident_type`, `severity` (0.0 to 1.0), `occurred_at`, `description`, `geom` (Geometry Point 4326, GiST Indexed).
+# 2. Build and start containers in detached mode
+docker compose up -d --build
+
+# 3. Check container logs & status
+docker compose ps
+docker compose logs -f app
+```
+
+That's it! Docker Compose will automatically:
+1. Spin up a PostGIS 16 database container (`postgis/postgis:16-3.4`).
+2. Run database table creation, 500m OSM road segmentation, feature vector seeding, IMD weather sync, and XGBoost model training (`scripts/populate_db.py`).
+3. Start the FastAPI backend on `http://0.0.0.0:8000`.
+4. Launch an automated hourly background weather sync container (`weather-worker`).
 
 ---
 
-## Quickstart & Setup Instructions
+### Method B: Deploying on Cloud Server (AWS EC2 / DigitalOcean / Hetzner)
 
-### 1. Install Dependencies
+#### Step 1: Install Docker & Docker Compose on Ubuntu/Debian Server
 ```bash
-uv sync --all-extras
+sudo apt update && sudo apt install -y docker.io docker-compose-v2
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
 ```
 
-### 2. Configure Database Environment
-Ensure `.env` contains your PostgreSQL/PostGIS connection string:
+#### Step 2: Clone & Launch
 ```bash
-cp .env.example .env
+git clone <your-repo-url> backend
+cd backend
+docker compose up -d
 ```
 
-Default connection string:
-```text
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/road_risk
+#### Step 3: Nginx Reverse Proxy with Free SSL (Certbot HTTPS)
+Create `/etc/nginx/sites-available/road-risk`:
+
+```nginx
+server {
+    server_name api.roadrisk-ner.org;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
 ```
 
-### 3. One-Command Master Database Population & XGBoost Training
-
-Run the master setup script to populate all tables and train the XGBoost model:
+Enable site and acquire free SSL certificate:
 ```bash
-uv run python scripts/populate_db.py
+sudo ln -s /etc/nginx/sites-available/road-risk /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d api.roadrisk-ner.org
 ```
-
-### 4. Start FastAPI Server
-```bash
-uv run uvicorn app.main:app --reload
-```
-Server runs at `http://127.0.0.1:8000`.
-
----
-
-## Individual Helper Scripts
-
-If you wish to run individual pipeline steps separately:
-
-| Command | Description |
-|---|---|
-| `uv run python scripts/import_osm.py [path.pbf]` | Extract OSM highways and segment into 500m metric chunks |
-| `uv run python scripts/seed_features.py` | Seed multi-dimensional feature vectors and compute risk scores |
-| `uv run python scripts/seed_historical_incidents.py` | Seed historical disaster incident ground-truth records |
-| `uv run python scripts/sync_weather.py` | Fetch live IMD precipitation data and update risk scores |
-| `uv run python scripts/train_model.py` | Train XGBoost classifier model and save to `models/` |
 
 ---
 
@@ -269,38 +272,38 @@ GET /api/v1/segments/{segment_id}/features
 
 ---
 
-### Update Segment Features
+### Submit Real-Time Field Incident Report
 ```http
-PUT /api/v1/segments/{segment_id}/features
+POST /api/v1/reports
 ```
 **Request Payload:**
 ```json
 {
-  "rainfall_24h_mm": 190.0,
-  "flood_reports_24h": 5,
-  "construction_active": true
+  "latitude": 26.14,
+  "longitude": 91.73,
+  "report_type": "landslide",
+  "severity": 0.85,
+  "reporter_name": "Field Officer Barua",
+  "reporter_role": "Engineer",
+  "description": "Active rockfall blocking right lane on GS Road"
 }
-```
-Updates feature values and automatically recalculates segment risk.
-
----
-
-### Get Segment Rule-Based Risk
-```http
-GET /api/v1/segments/{segment_id}/risk
 ```
 **Response:**
 ```json
 {
+  "report_id": 1,
   "segment_id": 1,
-  "overall_blockage_risk": 0.84,
-  "risk_category": "CRITICAL",
-  "hazards": {
-    "flood": 1.0,
-    "landslide": 1.0,
-    "road_damage": 0.47,
-    "congestion": 0.22
-  }
+  "reporter_name": "Field Officer Barua",
+  "reporter_role": "Engineer",
+  "report_type": "landslide",
+  "severity": 0.85,
+  "status": "SUBMITTED",
+  "description": "Active rockfall blocking right lane on GS Road",
+  "photo_url": null,
+  "latitude": 26.14,
+  "longitude": 91.73,
+  "created_at": "2026-09-05 19:39:36.684936+05:30",
+  "updated_at": "2026-09-05 19:39:36.684936+05:30"
 }
 ```
 
@@ -325,66 +328,6 @@ GET /api/v1/segments/{segment_id}/ml-risk
   },
   "model_name": "XGBoostClassifier v1.0"
 }
-```
-
----
-
-### Submit Real-Time Field Incident Report
-```http
-POST /api/v1/reports
-```
-**Request Payload:**
-```json
-{
-  "segment_id": 1,
-  "report_type": "landslide",
-  "reporter_name": "Assam Disaster Patrol",
-  "comment": "Active mudslide blocking left lane on GS Road"
-}
-```
-**Response:**
-```json
-{
-  "message": "Field report recorded successfully and risk score updated.",
-  "segment_id": 1,
-  "report_type": "landslide",
-  "updated_risk_category": "HIGH",
-  "updated_overall_risk": 0.63
-}
-```
-
----
-
-### Retrain XGBoost Model
-```http
-POST /api/v1/ml/train
-```
-Retrains the XGBoost model on current PostGIS feature vectors and historical incident labels.
-
----
-
-## PostGIS SQL Inspection Queries
-
-```sql
--- Check total counts across all core tables
-SELECT 
-    (SELECT COUNT(*) FROM road_segments) AS road_segments_count,
-    (SELECT COUNT(*) FROM segment_features) AS features_count,
-    (SELECT COUNT(*) FROM segment_risks) AS risks_count,
-    (SELECT COUNT(*) FROM historical_incidents) AS incidents_count;
-
--- Inspect segments with rule-based and ML risk ratings
-SELECT
-    s.segment_id,
-    s.road_type,
-    s.name,
-    s.length_m,
-    r.overall_blockage_risk AS rule_risk,
-    r.risk_category AS rule_category,
-    ST_GeometryType(s.geom) AS geom_type
-FROM road_segments s
-LEFT JOIN segment_risks r ON s.segment_id = r.segment_id
-LIMIT 10;
 ```
 
 ---
