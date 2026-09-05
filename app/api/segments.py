@@ -12,6 +12,8 @@ router = APIRouter(prefix="/segments", tags=["segments"])
 @router.get("", response_model=GeoJSONFeatureCollection)
 def list_segments(
     road_type: Optional[str] = Query(None, description="Filter by road_type (e.g. primary, secondary)"),
+    risk_category: Optional[str] = Query(None, description="Filter by risk category (LOW, MEDIUM, HIGH, CRITICAL)"),
+    min_risk: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum overall blockage risk score"),
     min_lon: Optional[float] = Query(None, description="Bounding box minimum longitude"),
     min_lat: Optional[float] = Query(None, description="Bounding box minimum latitude"),
     max_lon: Optional[float] = Query(None, description="Bounding box maximum longitude"),
@@ -20,11 +22,13 @@ def list_segments(
     db: Session = Depends(get_db),
 ):
     """
-    Get all or filtered road segments as a GeoJSON FeatureCollection.
+    Get all or filtered road segments as a GeoJSON FeatureCollection with risk scores.
     """
     return get_road_segments(
         db=db,
         road_type=road_type,
+        risk_category=risk_category,
+        min_risk=min_risk,
         min_lon=min_lon,
         min_lat=min_lat,
         max_lon=max_lon,
@@ -39,7 +43,7 @@ def get_segment(
     db: Session = Depends(get_db),
 ):
     """
-    Get a single road segment by segment_id with metadata and GeoJSON geometry.
+    Get a single road segment by segment_id with metadata, risk score, and GeoJSON geometry.
     """
     segment = get_road_segment_by_id(db=db, segment_id=segment_id)
     if not segment:
