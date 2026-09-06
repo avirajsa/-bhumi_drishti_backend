@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from app.db.database import engine, SessionLocal, Base
 from app.db.models import RoadSegment, SegmentFeature, SegmentRisk
 from app.services.segments import recalculate_and_save_risk
+from app.services.risk_engine import evaluate_segment_risk
 
 
 def seed_features_and_risks():
@@ -101,13 +102,24 @@ def seed_features_and_risks():
             feat.flood_reports_24h = flood_reports
             feat.landslide_reports_24h = landslide_reports
 
-            db.commit()
-            db.refresh(feat)
-
             # Calculate and store risk score
-            risk_obj = recalculate_and_save_risk(db, seg, feat)
-            risk_counts[risk_obj.risk_category] = risk_counts.get(risk_obj.risk_category, 0) + 1
+            overall_risk, category, hazards = evaluate_segment_risk(feat, seg)
+            risk_obj = db.query(SegmentRisk).filter(SegmentRisk.segment_id == sid).first()
+            if not risk_obj:
+                risk_obj = SegmentRisk(segment_id=sid)
+                db.add(risk_obj)
+
+            risk_obj.overall_blockage_risk = overall_risk
+            risk_obj.risk_category = category
+            risk_obj.hazard_flood = hazards["flood"]
+            risk_obj.hazard_landslide = hazards["landslide"]
+            risk_obj.hazard_road_damage = hazards["road_damage"]
+            risk_obj.hazard_congestion = hazards["congestion"]
+
+            risk_counts[category] = risk_counts.get(category, 0) + 1
             count_updated += 1
+
+        db.commit()
 
         print(f"\n--- Seeding Complete ---")
         print(f"Total Segments Seeded: {count_updated}")

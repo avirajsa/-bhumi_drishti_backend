@@ -48,21 +48,27 @@ def test_get_segments_filtered_by_risk_category(client):
 
 
 def test_get_single_segment(client):
-    response = client.get("/api/v1/segments/1")
+    seg_resp = client.get("/api/v1/segments")
+    seg_id = seg_resp.json()["features"][0]["properties"]["segment_id"]
+
+    response = client.get(f"/api/v1/segments/{seg_id}")
     assert response.status_code == 200
     data = response.json()
 
     assert data.get("type") == "Feature"
     assert "geometry" in data
-    assert data["properties"]["segment_id"] == 1
+    assert data["properties"]["segment_id"] == seg_id
 
 
 def test_get_segment_features_structure(client):
-    response = client.get("/api/v1/segments/1/features")
+    seg_resp = client.get("/api/v1/segments")
+    seg_id = seg_resp.json()["features"][0]["properties"]["segment_id"]
+
+    response = client.get(f"/api/v1/segments/{seg_id}/features")
     assert response.status_code == 200
     data = response.json()
 
-    assert data["segment_id"] == 1
+    assert data["segment_id"] == seg_id
     assert "road" in data
     assert "terrain" in data
     assert "hydrology" in data
@@ -74,20 +80,26 @@ def test_get_segment_features_structure(client):
 
 
 def test_get_segment_risk(client):
-    response = client.get("/api/v1/segments/1/risk")
+    seg_resp = client.get("/api/v1/segments")
+    seg_id = seg_resp.json()["features"][0]["properties"]["segment_id"]
+
+    response = client.get(f"/api/v1/segments/{seg_id}/risk")
     assert response.status_code == 200
     data = response.json()
 
-    assert data["segment_id"] == 1
+    assert data["segment_id"] == seg_id
     assert "overall_blockage_risk" in data
     assert "risk_category" in data
     assert "hazards" in data
 
 
 def test_field_report_crud_and_status_workflow(client):
+    seg_resp = client.get("/api/v1/segments")
+    seg_id = seg_resp.json()["features"][0]["properties"]["segment_id"]
+
     # 1. Create a field report with GPS coordinates
     report_payload = {
-        "segment_id": 1,
+        "segment_id": seg_id,
         "report_type": "landslide",
         "severity": 0.85,
         "reporter_name": "Patrol Officer Sharma",
@@ -101,7 +113,7 @@ def test_field_report_crud_and_status_workflow(client):
     assert create_resp.status_code == 200
     report_data = create_resp.json()
     
-    assert report_data["segment_id"] == 1
+    assert report_data["segment_id"] == seg_id
     assert report_data["report_type"] == "landslide"
     assert report_data["status"] == "SUBMITTED"
     report_id = report_data["report_id"]
@@ -120,11 +132,14 @@ def test_field_report_crud_and_status_workflow(client):
 
 
 def test_ml_risk_prediction(client):
-    response = client.get("/api/v1/segments/1/ml-risk")
+    seg_resp = client.get("/api/v1/segments")
+    seg_id = seg_resp.json()["features"][0]["properties"]["segment_id"]
+
+    response = client.get(f"/api/v1/segments/{seg_id}/ml-risk")
     assert response.status_code == 200
     data = response.json()
 
-    assert data["segment_id"] == 1
+    assert data["segment_id"] == seg_id
     assert "ml_blockage_probability" in data
     assert 0.0 <= data["ml_blockage_probability"] <= 1.0
     assert data["ml_risk_category"] in ("LOW", "MEDIUM", "HIGH", "CRITICAL")

@@ -9,7 +9,7 @@ from app.services.risk_engine import evaluate_segment_risk
 from app.services.ml_engine import predict_segment_ml_risk
 
 
-def recalculate_and_save_risk(db: Session, segment: RoadSegment, feat: SegmentFeature) -> SegmentRisk:
+def recalculate_and_save_risk(db: Session, segment: RoadSegment, feat: SegmentFeature, commit: bool = True) -> SegmentRisk:
     """
     Computes risk metrics for a segment using its feature vector and saves/updates SegmentRisk.
     """
@@ -27,8 +27,9 @@ def recalculate_and_save_risk(db: Session, segment: RoadSegment, feat: SegmentFe
     risk_obj.hazard_road_damage = hazards["road_damage"]
     risk_obj.hazard_congestion = hazards["congestion"]
 
-    db.commit()
-    db.refresh(risk_obj)
+    if commit:
+        db.commit()
+        db.refresh(risk_obj)
     return risk_obj
 
 

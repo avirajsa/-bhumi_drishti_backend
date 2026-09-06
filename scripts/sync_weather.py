@@ -40,6 +40,7 @@ def sync_imd_weather_and_update_risks():
 
         # Group segments into 0.05° weather grid (~5km resolution across NER)
         grid_cache: Dict[Tuple[float, float], Tuple[float, float, float, float]] = {}
+        feats_dict = {f.segment_id: f for f in db.query(SegmentFeature).all()}
         updated_count = 0
 
         for segment, geojson_str in results:
@@ -52,22 +53,22 @@ def sync_imd_weather_and_update_risks():
             r1, r6, r24, r72 = grid_cache[grid_key]
 
             # Update segment features in PostGIS
-            feat = db.query(SegmentFeature).filter(SegmentFeature.segment_id == segment.segment_id).first()
+            feat = feats_dict.get(segment.segment_id)
             if not feat:
                 feat = SegmentFeature(segment_id=segment.segment_id)
                 db.add(feat)
+                feats_dict[segment.segment_id] = feat
 
             feat.rainfall_1h_mm = r1
             feat.rainfall_6h_mm = r6
             feat.rainfall_24h_mm = r24
             feat.rainfall_72h_mm = r72
-            db.commit()
-            db.refresh(feat)
 
-            # Recalculate segment risk score
-            recalculate_and_save_risk(db, segment, feat)
+            # Recalculate segment risk score without individual commits
+            recalculate_and_save_risk(db, segment, feat, commit=False)
             updated_count += 1
 
+        db.commit()
         print(f"\n--- IMD Weather Sync Complete ---")
         print(f"IMD Weather Grid Cells Processed: {len(grid_cache)}")
         print(f"Road Segments Updated: {updated_count}")
