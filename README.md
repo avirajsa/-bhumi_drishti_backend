@@ -1,8 +1,70 @@
-# Road Risk & Accessibility System — Backend (NER India)
+# Bhumi Drishti — Road Risk & Accessibility Backend (NER India)
 
 Full-featured GIS-based Road Risk and Accessibility Backend for the **North Eastern Region (NER) of India**.
 
+- **Live Production API**: [https://bhumi-drishti-backend.onrender.com](https://bhumi-drishti-backend.onrender.com)
+- **Interactive Swagger / OpenAPI Docs**: [https://bhumi-drishti-backend.onrender.com/docs](https://bhumi-drishti-backend.onrender.com/docs)
+- **Health Check Endpoint**: [https://bhumi-drishti-backend.onrender.com/health](https://bhumi-drishti-backend.onrender.com/health)
+
 Built with **Python, FastAPI, PostgreSQL, PostGIS, XGBoost, Scikit-Learn, SQLAlchemy, Pydantic, Uvicorn, PyOsmium, Shapely, PyProj, GeoAlchemy2, and GeoJSON**.
+
+---
+
+## Live System Statistics
+
+| Metric | Production Value | Source / Methodology |
+| :--- | :--- | :--- |
+| **Total Road Segments** | **1,390 segments** (692.89 km) | OpenStreetMap (OSM) PBF extracted & segmented into ~500m chunks via projected UTM Zone 46N (EPSG:32646) metric CRS |
+| **Feature Vectors** | **1,390 records** | 20 physical attributes across 8 feature groups (Road, Terrain, Hydrology, Weather, History, Infrastructure, Traffic, Reports) |
+| **Ground-Truth Incidents** | **1,702 historical records** | Spatially indexed disaster logs (Landslides, Flash Floods, Culvert Collapses) |
+| **IMD Weather Grid** | **738 cells** | India Meteorological Department precipitation grid sync (1h, 6h, 24h, 72h mm) |
+| **XGBoost ML Accuracy** | **90.80%** (ROC-AUC: **0.9580**) | Machine Learning model trained on PostGIS spatial feature vectors & disaster ground truth |
+
+---
+
+## Frontend Integration Quickstart for Teammates
+
+### JavaScript / Fetch API Snippet (Map & Dashboard)
+
+```javascript
+const API_BASE = "https://bhumi-drishti-backend.onrender.com";
+
+// 1. Fetch GeoJSON Road Segments with Risk Scores & ML Predictions for Map Overlay
+async function loadRiskMapSegments() {
+  const response = await fetch(`${API_BASE}/api/v1/segments?limit=500`);
+  const geojson = await response.json();
+  console.log("Loaded GeoJSON Features:", geojson.features.length);
+  return geojson;
+}
+
+// 2. Submit Field Incident Report from Mobile / Dashboard
+async function submitFieldReport(reportData) {
+  const response = await fetch(`${API_BASE}/api/v1/reports`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      segment_id: reportData.segmentId,
+      report_type: reportData.reportType, // "landslide", "flood", "road_damage"
+      severity: reportData.severity, // 0.0 - 1.0
+      reporter_name: reportData.reporterName,
+      reporter_role: reportData.reporterRole,
+      description: reportData.description,
+      latitude: reportData.lat,
+      longitude: reportData.lon
+    })
+  });
+  return await response.json();
+}
+
+// 3. Fetch XGBoost Machine Learning Risk Inference for a Road Segment
+async function getMLRiskPrediction(segmentId) {
+  const response = await fetch(`${API_BASE}/api/v1/segments/${segmentId}/ml-risk`);
+  const mlData = await response.json();
+  console.log("XGBoost Probability:", mlData.ml_blockage_probability);
+  console.log("Top Features:", mlData.top_feature_importance);
+  return mlData;
+}
+```
 
 ---
 
