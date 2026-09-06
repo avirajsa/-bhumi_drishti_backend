@@ -145,3 +145,43 @@ def test_ml_risk_prediction(client):
     assert data["ml_risk_category"] in ("LOW", "MEDIUM", "HIGH", "CRITICAL")
     assert "top_feature_importance" in data
     assert "model_name" in data
+
+
+def test_dashboard_stats_endpoint(client):
+    response = client.get("/api/v1/dashboard/stats")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "active_vehicles_count" in data
+    assert "roads_at_risk_count" in data
+    assert "disruption_count" in data
+    assert "accessibility_percentage" in data
+    assert "time_ist" in data
+
+
+def test_dashboard_states_endpoint(client):
+    response = client.get("/api/v1/dashboard/states")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "states" in data
+    assert len(data["states"]) == 8
+
+
+def test_dashboard_alerts_endpoint(client):
+    response = client.get("/api/v1/dashboard/alerts")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "active_incidents_count" in data
+    assert "alerts" in data
+
+
+def test_dashboard_weather_telemetry_endpoint(client):
+    response = client.get("/api/v1/dashboard/weather-telemetry")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "title" in data
+    assert "weather_cards" in data
+    assert len(data["weather_cards"]) > 0

@@ -33,11 +33,30 @@ def recalculate_and_save_risk(db: Session, segment: RoadSegment, feat: SegmentFe
     return risk_obj
 
 
+NER_STATE_BOUNDS = {
+    "AS": (89.60, 24.10, 96.00, 28.00),
+    "ASSAM": (89.60, 24.10, 96.00, 28.00),
+    "AR": (91.50, 26.50, 97.50, 29.50),
+    "ARUNACHAL PRADESH": (91.50, 26.50, 97.50, 29.50),
+    "MN": (93.00, 23.80, 94.80, 25.70),
+    "MANIPUR": (93.00, 23.80, 94.80, 25.70),
+    "ML": (89.80, 25.00, 92.80, 26.15),
+    "MEGHALAYA": (89.80, 25.00, 92.80, 26.15),
+    "MZ": (92.20, 21.90, 93.50, 24.50),
+    "MIZORAM": (92.20, 21.90, 93.50, 24.50),
+    "NL": (93.30, 25.20, 95.30, 27.00),
+    "NAGALAND": (93.30, 25.20, 95.30, 27.00),
+    "TR": (91.10, 22.90, 92.40, 24.50),
+    "TRIPURA": (91.10, 22.90, 92.40, 24.50),
+}
+
+
 def get_road_segments(
     db: Session,
     road_type: Optional[str] = None,
     risk_category: Optional[str] = None,
     min_risk: Optional[float] = None,
+    state: Optional[str] = None,
     min_lon: Optional[float] = None,
     min_lat: Optional[float] = None,
     max_lon: Optional[float] = None,
@@ -45,7 +64,7 @@ def get_road_segments(
     limit: int = 500,
 ) -> Dict[str, Any]:
     """
-    Fetch road segments with optional filtering by road_type, risk_category, min_risk, or bounding box.
+    Fetch road segments with optional filtering by road_type, risk_category, min_risk, state, or bounding box.
     Returns a GeoJSON FeatureCollection containing rule-based risk and XGBoost ML probability.
     """
     query = db.query(
@@ -62,6 +81,13 @@ def get_road_segments(
 
     if min_risk is not None:
         query = query.filter(SegmentRisk.overall_blockage_risk >= min_risk)
+
+    if state:
+        st_key = state.strip().upper()
+        if st_key in NER_STATE_BOUNDS:
+            b = NER_STATE_BOUNDS[st_key]
+            state_envelope = ST_MakeEnvelope(b[0], b[1], b[2], b[3], 4326)
+            query = query.filter(ST_Intersects(RoadSegment.geom, state_envelope))
 
     if min_lon is not None and min_lat is not None and max_lon is not None and max_lat is not None:
         bbox_geom = ST_MakeEnvelope(min_lon, min_lat, max_lon, max_lat, 4326)

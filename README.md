@@ -211,6 +211,104 @@ sudo certbot --nginx -d api.roadrisk-ner.org
 
 ## Complete API Reference
 
+### 1. Dashboard UI Endpoints (`/api/v1/dashboard`)
+
+| Endpoint | Method | UI Component Powered | Response Description |
+| :--- | :--- | :--- | :--- |
+| `/api/v1/dashboard/stats` | `GET` | **Top KPI Header Cards** | Returns `active_vehicles_count` (4,820), `roads_at_risk_count` (58), `disruption_count` (0), `accessibility_percentage` (89.2%), `api_connection`, and IST time string. |
+| `/api/v1/dashboard/states` | `GET` | **7 Sisters State Sidebar** | Returns state-wise risk stretch counts & accessibility percentages for `All States` (NER), `Assam`, `Arunachal Pradesh`, `Manipur`, `Meghalaya`, `Mizoram`, `Nagaland`, `Tripura`. |
+| `/api/v1/dashboard/alerts` | `GET` | **ALERTS LOG (LIVE API)** | Stream of real-time active incident telemetry & submitted field reports. |
+| `/api/v1/dashboard/weather-telemetry` | `GET` | **WEATHER UPDATES (RISK-PRIORITIZED)** | State-wise meteorological telemetry ranked by hazard severity index (`Meghalaya` Risk 92/100, `Arunachal Pradesh` Risk 89/100, `Manipur` Risk 76/100) with advisory alerts. |
+
+#### GET `/api/v1/dashboard/stats`
+Powers the top 5 header stat cards (`Active Vehicles`, `Roads At-Risk`, `Disruptions`, `Accessibility %`, `API Connection Status`, `IST Clock`):
+```json
+{
+  "active_vehicles_count": 4820,
+  "active_vehicles_label": "Live Corridors",
+  "roads_at_risk_count": 58,
+  "roads_at_risk_label": "High/Crit Stretches",
+  "disruption_count": 0,
+  "disruption_label": "Reports & Blockages",
+  "accessibility_percentage": 89.2,
+  "accessibility_label": "Network Operational",
+  "api_connection": {
+    "status": "CONNECTED",
+    "provider": "Render PostGIS v0.5",
+    "db_connected": true
+  },
+  "time_ist": "16 : 43 : 31",
+  "total_road_segments": 1390,
+  "total_road_km": 692.89
+}
+```
+
+#### GET `/api/v1/dashboard/states`
+Powers the left sidebar state filter for the 7 Sister States of NER:
+```json
+{
+  "states": [
+    { "code": "NER", "name": "All States", "at_risk_count": 58, "accessibility": 89.2 },
+    { "code": "AS", "name": "Assam", "at_risk_count": 14, "accessibility": 91.5 },
+    { "code": "AR", "name": "Arunachal Pradesh", "at_risk_count": 12, "accessibility": 84.1 },
+    { "code": "MN", "name": "Manipur", "at_risk_count": 9, "accessibility": 88.0 },
+    { "code": "ML", "name": "Meghalaya", "at_risk_count": 11, "accessibility": 82.4 },
+    { "code": "MZ", "name": "Mizoram", "at_risk_count": 5, "accessibility": 90.3 },
+    { "code": "NL", "name": "Nagaland", "at_risk_count": 4, "accessibility": 87.6 },
+    { "code": "TR", "name": "Tripura", "at_risk_count": 3, "accessibility": 93.8 }
+  ]
+}
+```
+
+#### GET `/api/v1/dashboard/alerts`
+Powers the top-right live incident alerts feed:
+```json
+{
+  "active_incidents_count": 0,
+  "status_text": "Listening to live Incident telemetry feed...",
+  "alerts": []
+}
+```
+
+#### GET `/api/v1/dashboard/weather-telemetry`
+Powers the bottom-right risk-prioritized meteorological telemetry cards:
+```json
+{
+  "title": "WEATHER UPDATES (RISK-PRIORITIZED)",
+  "subtitle": "State-wise meteorological telemetry • Ranked by hazard severity index",
+  "weather_cards": [
+    {
+      "priority": 1,
+      "severity_level": "CRITICAL",
+      "state_name": "Meghalaya",
+      "state_code": "ML",
+      "risk_score": 92,
+      "temperature_c": 19.6,
+      "rainfall_mm_h": 62.4,
+      "wind_speed_kmh": 28.0,
+      "wind_direction": "S",
+      "advisory": "Red Alert: Severe cloudburst activity recorded"
+    },
+    {
+      "priority": 2,
+      "severity_level": "CRITICAL",
+      "state_name": "Arunachal Pradesh",
+      "state_code": "AR",
+      "risk_score": 89,
+      "temperature_c": 18.2,
+      "rainfall_mm_h": 45.0,
+      "wind_speed_kmh": 31.0,
+      "wind_direction": "NE",
+      "advisory": "Red Alert: Torrential rains triggering slope destabilization"
+    }
+  ]
+}
+```
+
+---
+
+### 2. Core GIS & Risk Endpoints
+
 ### Health Check
 ```http
 GET /health
@@ -229,6 +327,7 @@ GET /api/v1/segments
 - `road_type`: Filter by road type (`primary`, `secondary`, `tertiary`, `trunk`)
 - `risk_category`: Filter by risk category (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`)
 - `min_risk`: Minimum overall blockage risk (e.g. `0.55`)
+- `state`: Filter by state name or 2-letter code for region cutout views (`Assam` / `AS`, `Arunachal Pradesh` / `AR`, `Manipur` / `MN`, `Meghalaya` / `ML`, `Mizoram` / `MZ`, `Nagaland` / `NL`, `Tripura` / `TR`)
 - `min_lon`, `min_lat`, `max_lon`, `max_lat`: Bounding box coordinates
 - `limit`: Maximum segments to return (default 500)
 
