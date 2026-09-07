@@ -185,3 +185,13 @@ def test_dashboard_weather_telemetry_endpoint(client):
     assert "title" in data
     assert "weather_cards" in data
     assert len(data["weather_cards"]) > 0
+
+
+def test_dashboard_sync_and_reevaluate_endpoint(client):
+    response = client.post("/api/v1/dashboard/sync-and-reevaluate")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["status"] == "SUCCESS"
+    assert "total_segments_evaluated" in data
+    assert "roads_at_risk_count" in data

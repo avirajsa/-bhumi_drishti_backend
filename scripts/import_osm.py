@@ -1,372 +1,819 @@
 #!/usr/bin/env python3
 """
-OSM PBF Importer & Road Segmenter for Road Risk & Accessibility System (NER India)
+Real OpenStreetMap PBF Importer & Road Segmenter
+for Road Risk & Accessibility System (NER India)
+
+IMPORTANT:
+    This script NEVER generates sample/fabricated road data.
+
+    A real OpenStreetMap .osm.pbf file MUST be supplied.
 
 Usage:
-    python scripts/import_osm.py [path/to/extract.osm.pbf]
+    python scripts/import_osm.py path/to/real.osm.pbf
 
-If no PBF file is provided, a comprehensive NER India road network extract (1,000+ segments) is created and imported.
+Example:
+    python scripts/import_osm.py data/osm/north-eastern-zone-latest.osm.pbf
+
+Behavior:
+    1. Validates the supplied PBF file.
+    2. Reads actual OpenStreetMap Ways using pyosmium.
+    3. Extracts actual OSM road attributes and coordinates.
+    4. Converts each OSM road Way into ~500 m segments.
+    5. Stores the resulting geometries in PostGIS.
+    6. Stores the original OSM Way ID for provenance.
+
+There is NO:
+    - sample road generation
+    - random data
+    - fabricated coordinates
+    - fabricated road attributes
+    - fallback dataset
 """
 
 import sys
 import os
 import math
+from typing import Optional
+
 import pyproj
 import osmium
+
 from shapely.geometry import LineString
 from shapely.ops import transform, substring
+
 from geoalchemy2.shape import from_shape
 from sqlalchemy.orm import Session
 
-# Add project root to sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# ---------------------------------------------------------------------------
+# Project imports
+# ---------------------------------------------------------------------------
+
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
+)
+
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from app.db.database import engine, SessionLocal, Base
 from app.db.models import RoadSegment
 
-# CRS transformations (WGS84 <-> UTM Zone 46N for North Eastern Region of India)
-WGS84_CRS = "EPSG:4326"
-UTM_NER_CRS = "EPSG:32646"
 
-transformer_to_metric = pyproj.Transformer.from_crs(WGS84_CRS, UTM_NER_CRS, always_xy=True).transform
-transformer_to_wgs84 = pyproj.Transformer.from_crs(UTM_NER_CRS, WGS84_CRS, always_xy=True).transform
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+WGS84_CRS = "EPSG:4326"
 
 TARGET_SEGMENT_LENGTH_M = 500.0
 
+# Vehicular road classes we actually want for a road-risk/accessibility system.
+#
+# This is a FILTER, not fabricated data.
+#
+# OSM highway=* values outside this set are ignored.
+ALLOWED_HIGHWAY_TYPES = {
+    "motorway",
+    "motorway_link",
+    "trunk",
+    "trunk_link",
+    "primary",
+    "primary_link",
+    "secondary",
+    "secondary_link",
+    "tertiary",
+    "tertiary_link",
+    "unclassified",
+    "residential",
+    "service",
+    "living_street",
+    "road",
+    "track",
+}
 
-def parse_boolean_tag(val: str | None) -> bool | None:
+
+# ---------------------------------------------------------------------------
+# OSM tag parsing
+# ---------------------------------------------------------------------------
+
+def parse_boolean_tag(val: Optional[str]) -> Optional[bool]:
+    """
+    Convert common OSM boolean tag values into Python bool.
+
+    Examples:
+        yes   -> True
+        true  -> True
+        1     -> True
+        no    -> False
+        false -> False
+        0     -> False
+
+    Unknown/missing values remain None.
+
+    IMPORTANT:
+        We do NOT guess when OSM doesn't provide a usable value.
+    """
     if val is None:
         return None
+
     val_clean = val.strip().lower()
+
     if val_clean in ("yes", "true", "1"):
         return True
+
     if val_clean in ("no", "false", "0"):
         return False
+
     return None
 
 
-def parse_int_tag(val: str | None) -> int | None:
+def parse_int_tag(val: Optional[str]) -> Optional[int]:
+    """
+    Convert an OSM integer tag to int.
+
+    Unknown/non-integer values remain None.
+
+    We deliberately do not guess values.
+    """
     if val is None:
         return None
+
     try:
         return int(val.strip())
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 
-def create_sample_ner_pbf(output_path: str):
+# ---------------------------------------------------------------------------
+# UTM helpers
+# ---------------------------------------------------------------------------
+
+def utm_zone_from_longitude(longitude: float) -> int:
     """
-    Generate an expanded, comprehensive OSM PBF extract for major road corridors in North Eastern Region (NER) India.
-    Covers highways across Meghalaya, Assam, Sikkim, Tripura, Manipur, Mizoram, Nagaland, and Arunachal Pradesh.
+    Determine the UTM zone containing a longitude.
+
+    UTM zones are 6 degrees wide:
+
+        Zone 1:   -180 to -174
+        Zone 2:   -174 to -168
+        ...
+        Zone 46:    84 to 90
+        Zone 47:    90 to 96
+        Zone 48:    96 to 102
+
+    NER spans multiple zones, so we do not force everything into Zone 46.
     """
-    print(f"Generating expanded NER OSM PBF extract at: {output_path}")
-    if os.path.exists(output_path):
-        os.remove(output_path)
-    writer = osmium.SimpleWriter(output_path)
+    zone = int((longitude + 180.0) / 6.0) + 1
 
-    # 15+ Major Transport Corridors in NER India
-    sample_roads = [
-        # 1. GS Road (Guwahati - Shillong National Highway NH-27)
-        {
-            "way_id": 100001,
-            "highway": "primary",
-            "name": "GS Road (Guwahati - Shillong Highway, NH-27)",
-            "ref": "NH-27",
-            "lanes": "4",
-            "surface": "asphalt",
-            "maxspeed": "70",
-            "nodes": [
-                (1, 91.7362, 26.1438), (2, 91.7510, 26.1280), (3, 91.7700, 26.1100), (4, 91.7950, 26.0850),
-                (5, 91.8200, 26.0500), (6, 91.8500, 26.0100), (7, 91.8800, 25.9600), (8, 91.8980, 25.9180),
-                (9, 91.9100, 25.8800), (10, 91.9300, 25.8400), (11, 91.9500, 25.7900), (12, 91.9700, 25.7400),
-                (13, 91.8800, 25.5700)
-            ]
-        },
-        # 2. Shillong - Sohra / Cherrapunji Mountain Highway (NH-106)
-        {
-            "way_id": 100002,
-            "highway": "secondary",
-            "name": "Shillong - Cherrapunji Mountain Highway (NH-106)",
-            "ref": "NH-106",
-            "lanes": "2",
-            "surface": "asphalt",
-            "maxspeed": "50",
-            "nodes": [
-                (20, 91.8800, 25.5700), (21, 91.8500, 25.5200), (22, 91.8300, 25.4700), (23, 91.8000, 25.4200),
-                (24, 91.7800, 25.3700), (25, 91.7600, 25.3300), (26, 91.7350, 25.2800), (27, 91.7100, 25.2400)
-            ]
-        },
-        # 3. Cherrapunji - Dawki Border Corridor (SH-5)
-        {
-            "way_id": 100003,
-            "highway": "tertiary",
-            "name": "Cherrapunji - Dawki Border Highway (SH-5)",
-            "ref": "SH-5",
-            "lanes": "2",
-            "surface": "paved",
-            "maxspeed": "40",
-            "bridge": "yes",
-            "nodes": [
-                (30, 91.7350, 25.2800), (31, 91.7800, 25.2500), (32, 91.8300, 25.2200), (33, 91.8800, 25.2000),
-                (34, 91.9500, 25.1900), (35, 92.0100, 25.1850), (36, 92.0700, 25.1800)
-            ]
-        },
-        # 4. Assam Trans-East Kaziranga Corridor (NH-715 / AH-1)
-        {
-            "way_id": 100004,
-            "highway": "trunk",
-            "name": "Kaziranga Express Highway (AH-1 / NH-715)",
-            "ref": "AH-1",
-            "lanes": "4",
-            "surface": "asphalt",
-            "maxspeed": "80",
-            "nodes": [
-                (40, 92.8000, 26.6300), (41, 92.8500, 26.6100), (42, 92.9100, 26.5900), (43, 92.9800, 26.5700),
-                (44, 93.0500, 26.5600), (45, 93.1200, 26.5500), (46, 93.2000, 26.5550), (47, 93.2800, 26.5650),
-                (48, 93.3600, 26.5800), (49, 93.4500, 26.6000)
-            ]
-        },
-        # 5. Silchar - Imphal Mountain Corridor (NH-37)
-        {
-            "way_id": 100005,
-            "highway": "primary",
-            "name": "Silchar - Imphal National Highway (NH-37)",
-            "ref": "NH-37",
-            "lanes": "2",
-            "surface": "asphalt",
-            "maxspeed": "50",
-            "nodes": [
-                (50, 92.8000, 24.8200), (51, 92.9500, 24.8100), (52, 93.1000, 24.8000), (53, 93.2500, 24.7900),
-                (54, 93.4000, 24.7800), (55, 93.5500, 24.7900), (56, 93.7000, 24.8000), (57, 93.8500, 24.8100),
-                (58, 93.9400, 24.8150)
-            ]
-        },
-        # 6. Agartala - Sabroom Highway (NH-8)
-        {
-            "way_id": 100006,
-            "highway": "primary",
-            "name": "Agartala - Sabroom Tripura Highway (NH-8)",
-            "ref": "NH-8",
-            "lanes": "2",
-            "surface": "asphalt",
-            "maxspeed": "60",
-            "nodes": [
-                (60, 91.2800, 23.8300), (61, 91.3200, 23.7000), (62, 91.3600, 23.5500), (63, 91.4000, 23.4000),
-                (64, 91.4500, 23.2500), (65, 91.4800, 23.1000), (66, 91.5000, 22.9800)
-            ]
-        },
-        # 7. Dimapur - Kohima High-Altitude Pass (NH-29)
-        {
-            "way_id": 100007,
-            "highway": "secondary",
-            "name": "Dimapur - Kohima Nagaland Pass (NH-29)",
-            "ref": "NH-29",
-            "lanes": "2",
-            "surface": "paved",
-            "maxspeed": "40",
-            "nodes": [
-                (70, 93.7200, 25.9000), (71, 93.8000, 25.8500), (72, 93.9000, 25.8000), (73, 94.0000, 25.7500),
-                (74, 94.1000, 25.6700)
-            ]
-        },
-        # 8. Siliguri - Gangtok Mountain Highway (NH-10)
-        {
-            "way_id": 100008,
-            "highway": "primary",
-            "name": "Siliguri - Gangtok Sikkim Highway (NH-10)",
-            "ref": "NH-10",
-            "lanes": "2",
-            "surface": "asphalt",
-            "maxspeed": "45",
-            "nodes": [
-                (80, 88.4300, 26.7200), (81, 88.4800, 26.8500), (82, 88.5200, 27.0000), (83, 88.5700, 27.1500),
-                (84, 88.6000, 27.3000), (85, 88.6150, 27.3300)
-            ]
-        },
-        # 9. Tezpur - Tawang Himalayan Frontier Pass (NH-13)
-        {
-            "way_id": 100009,
-            "highway": "secondary",
-            "name": "Tezpur - Tawang Frontier Highway (NH-13)",
-            "ref": "NH-13",
-            "lanes": "2",
-            "surface": "gravel",
-            "maxspeed": "35",
-            "nodes": [
-                (90, 92.8000, 26.6300), (91, 92.6000, 26.9000), (92, 92.4000, 27.2000), (93, 92.2000, 27.4500),
-                (94, 91.9000, 27.6000), (95, 91.8600, 27.5800)
-            ]
-        },
-        # 10. Guwahati City Zoo Road Tiniali Bypass
-        {
-            "way_id": 100010,
-            "highway": "residential",
-            "name": "Guwahati Zoo Road Tiniali Bypass",
-            "lanes": "2",
-            "surface": "concrete",
-            "nodes": [
-                (100, 91.7750, 26.1650), (101, 91.7780, 26.1680), (102, 91.7820, 26.1710), (103, 91.7860, 26.1740)
-            ]
-        }
-    ]
+    # Protect against invalid edge values.
+    return max(1, min(zone, 60))
 
-    created_node_ids = set()
-    for r in sample_roads:
-        node_ids = []
-        for nid, lon, lat in r["nodes"]:
-            if nid not in created_node_ids:
-                node = osmium.osm.mutable.Node(id=nid, location=(lon, lat))
-                writer.add_node(node)
-                created_node_ids.add(nid)
-            node_ids.append(nid)
 
-        tags = {
-            "highway": r["highway"],
-            "name": r["name"],
-        }
-        for k in ("ref", "lanes", "surface", "maxspeed", "bridge", "oneway"):
-            if k in r:
-                tags[k] = r[k]
+def metric_crs_for_line(line_wgs84: LineString) -> str:
+    """
+    Select the UTM CRS based on the longitude of the line's centroid.
 
-        way = osmium.osm.mutable.Way(id=r["way_id"], nodes=node_ids, tags=tags)
-        writer.add_way(way)
+    Northern Hemisphere:
+        EPSG:326XX
 
-    writer.close()
-    print("Expanded NER PBF generated successfully.")
+    Example:
+        UTM zone 46N -> EPSG:32646
+        UTM zone 47N -> EPSG:32647
+        UTM zone 48N -> EPSG:32648
+    """
+    centroid = line_wgs84.centroid
+    zone = utm_zone_from_longitude(centroid.x)
 
+    return f"EPSG:{32600 + zone}"
+
+
+def transform_to_metric(line_wgs84: LineString):
+    """
+    Transform a WGS84 LineString into an appropriate UTM zone.
+
+    Returns:
+        (metric_line, transformer_to_wgs84)
+    """
+    metric_crs = metric_crs_for_line(line_wgs84)
+
+    transformer_to_metric = pyproj.Transformer.from_crs(
+        WGS84_CRS,
+        metric_crs,
+        always_xy=True,
+    ).transform
+
+    transformer_to_wgs84 = pyproj.Transformer.from_crs(
+        metric_crs,
+        WGS84_CRS,
+        always_xy=True,
+    ).transform
+
+    line_metric = transform(
+        transformer_to_metric,
+        line_wgs84,
+    )
+
+    return line_metric, transformer_to_wgs84
+
+
+# ---------------------------------------------------------------------------
+# OSM extraction
+# ---------------------------------------------------------------------------
 
 class RoadExtractorHandler(osmium.SimpleHandler):
+    """
+    Osmium handler that extracts real OSM road Ways.
+
+    No road geometry is generated here.
+
+    Every coordinate comes directly from OSM.
+    Every road attribute comes directly from OSM.
+    """
+
     def __init__(self):
         super().__init__()
+
+        # List of dictionaries containing actual OSM road data.
         self.roads = []
 
+        # Statistics useful for diagnostics.
+        self.ways_seen = 0
+        self.roads_kept = 0
+        self.roads_skipped = 0
+
     def way(self, w):
+        """
+        Called by pyosmium for every OSM Way in the PBF.
+        """
+
+        self.ways_seen += 1
+
+        # ---------------------------------------------------------------
+        # Must have highway tag.
+        # ---------------------------------------------------------------
+
         if "highway" not in w.tags:
+            self.roads_skipped += 1
             return
 
         highway_type = w.tags.get("highway")
-        if highway_type in ("footway", "pedestrian", "steps", "path", "cycleway", "bridleway"):
+
+        # ---------------------------------------------------------------
+        # Keep only road classes relevant to the application.
+        # ---------------------------------------------------------------
+
+        if highway_type not in ALLOWED_HIGHWAY_TYPES:
+            self.roads_skipped += 1
             return
+
+        # ---------------------------------------------------------------
+        # Extract actual OSM node coordinates.
+        # ---------------------------------------------------------------
 
         coords = []
-        for n in w.nodes:
-            if n.location.valid():
-                coords.append((n.lon, n.lat))
 
+        for node in w.nodes:
+            if not node.location.valid():
+                continue
+
+            coords.append(
+                (
+                    node.lon,
+                    node.lat,
+                )
+            )
+
+        # A LineString needs at least two coordinates.
         if len(coords) < 2:
+            self.roads_skipped += 1
             return
 
-        self.roads.append({
-            "osm_way_id": w.id,
+        # ---------------------------------------------------------------
+        # Store actual OSM attributes.
+        # ---------------------------------------------------------------
+
+        road = {
+            "osm_way_id": int(w.id),
+
             "highway": highway_type,
+
             "name": w.tags.get("name"),
+
             "ref": w.tags.get("ref"),
-            "lanes": parse_int_tag(w.tags.get("lanes")),
+
+            "lanes": parse_int_tag(
+                w.tags.get("lanes")
+            ),
+
             "surface": w.tags.get("surface"),
-            "bridge": parse_boolean_tag(w.tags.get("bridge")),
-            "oneway": parse_boolean_tag(w.tags.get("oneway")),
+
+            "bridge": parse_boolean_tag(
+                w.tags.get("bridge")
+            ),
+
+            "oneway": parse_boolean_tag(
+                w.tags.get("oneway")
+            ),
+
             "maxspeed": w.tags.get("maxspeed"),
-            "coords": coords
-        })
+
+            "coords": coords,
+        }
+
+        self.roads.append(road)
+        self.roads_kept += 1
 
 
-def segment_and_store_roads(roads_data, db: Session):
+# ---------------------------------------------------------------------------
+# Road segmentation
+# ---------------------------------------------------------------------------
+
+def segment_and_store_roads(
+    roads_data,
+    db: Session,
+):
+    """
+    Convert actual OSM Ways into approximately 500 m segments.
+
+    No geometry is fabricated.
+
+    Every segment is a substring of an actual OSM road Way.
+    """
+
     total_segments_inserted = 0
     total_distance_m = 0.0
 
-    for road in roads_data:
-        line_wgs84 = LineString(road["coords"])
-        line_metric = transform(transformer_to_metric, line_wgs84)
+    for road_index, road in enumerate(roads_data, start=1):
+
+        coords = road["coords"]
+
+        # ---------------------------------------------------------------
+        # Create geometry from actual OSM coordinates.
+        # ---------------------------------------------------------------
+
+        try:
+            line_wgs84 = LineString(coords)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to create geometry for OSM Way "
+                f"{road['osm_way_id']}: {exc}"
+            ) from exc
+
+        if line_wgs84.is_empty:
+            continue
+
+        if not line_wgs84.is_valid:
+            # We don't silently repair geometry because doing so could
+            # alter the actual source geometry.
+            print(
+                f"WARNING: Skipping invalid geometry for "
+                f"OSM Way {road['osm_way_id']}"
+            )
+            continue
+
+        # ---------------------------------------------------------------
+        # Convert to a local metric CRS.
+        # ---------------------------------------------------------------
+
+        try:
+            line_metric, transformer_to_wgs84 = transform_to_metric(
+                line_wgs84
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"CRS transformation failed for OSM Way "
+                f"{road['osm_way_id']}: {exc}"
+            ) from exc
+
         total_len_m = line_metric.length
 
         if total_len_m <= 0:
             continue
 
+        # ---------------------------------------------------------------
+        # Determine number of ~500 m segments.
+        # ---------------------------------------------------------------
+
         if total_len_m <= TARGET_SEGMENT_LENGTH_M:
             num_segments = 1
         else:
-            num_segments = math.ceil(total_len_m / TARGET_SEGMENT_LENGTH_M)
+            num_segments = math.ceil(
+                total_len_m / TARGET_SEGMENT_LENGTH_M
+            )
 
+        # Dividing the road evenly means the final segment isn't tiny.
         step_len = total_len_m / num_segments
 
-        for i in range(num_segments):
-            start_d = i * step_len
-            end_d = min((i + 1) * step_len, total_len_m)
+        # ---------------------------------------------------------------
+        # Generate each segment as a substring of the real OSM geometry.
+        # ---------------------------------------------------------------
 
-            sub_line_metric = substring(line_metric, start_d, end_d)
-            sub_line_wgs84 = transform(transformer_to_wgs84, sub_line_metric)
+        for segment_index in range(num_segments):
+
+            start_d = segment_index * step_len
+
+            end_d = min(
+                (segment_index + 1) * step_len,
+                total_len_m,
+            )
+
+            sub_line_metric = substring(
+                line_metric,
+                start_d,
+                end_d,
+            )
+
+            if sub_line_metric.is_empty:
+                continue
+
+            # Convert the segment back to WGS84 for PostGIS storage.
+            sub_line_wgs84 = transform(
+                transformer_to_wgs84,
+                sub_line_metric,
+            )
+
+            if sub_line_wgs84.is_empty:
+                continue
+
             seg_len_m = sub_line_metric.length
 
-            wkb_geom = from_shape(sub_line_wgs84, srid=4326)
+            # -----------------------------------------------------------
+            # Convert Shapely geometry to GeoAlchemy/PostGIS geometry.
+            # -----------------------------------------------------------
+
+            wkb_geom = from_shape(
+                sub_line_wgs84,
+                srid=4326,
+            )
+
+            # -----------------------------------------------------------
+            # Create database record.
+            #
+            # All attributes originate from the OSM Way.
+            # -----------------------------------------------------------
 
             segment_record = RoadSegment(
                 osm_way_id=road["osm_way_id"],
+
                 road_type=road["highway"],
+
                 lanes=road["lanes"],
+
                 surface=road["surface"],
+
                 bridge=road["bridge"],
+
                 oneway=road["oneway"],
+
                 maxspeed=road["maxspeed"],
+
                 name=road["name"],
+
                 ref=road["ref"],
+
                 length_m=seg_len_m,
+
                 geom=wkb_geom,
             )
 
             db.add(segment_record)
+
             total_segments_inserted += 1
             total_distance_m += seg_len_m
 
+        # ---------------------------------------------------------------
+        # Periodic flush so SQLAlchemy doesn't hold every object forever.
+        # ---------------------------------------------------------------
+
+        if road_index % 1000 == 0:
+            db.flush()
+
+            print(
+                f"Processed {road_index:,} / "
+                f"{len(roads_data):,} road Ways | "
+                f"segments pending: "
+                f"{total_segments_inserted:,}"
+            )
+
+    # ---------------------------------------------------------------
+    # Commit the complete import.
+    # ---------------------------------------------------------------
+
     db.commit()
-    return total_segments_inserted, total_distance_m
+
+    return (
+        total_segments_inserted,
+        total_distance_m,
+    )
 
 
-def main():
-    if len(sys.argv) > 1:
-        pbf_path = sys.argv[1]
-    else:
-        pbf_path = os.path.join(os.path.dirname(__file__), "sample_ner.pbf")
-        create_sample_ner_pbf(pbf_path)
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
+def validate_pbf_path(pbf_path: str):
+    """
+    Strictly validate the input.
+
+    There is NO fallback.
+
+    Missing/invalid input = error + exit.
+    """
+
+    if not pbf_path:
+        raise ValueError(
+            "No PBF file was supplied."
+        )
 
     if not os.path.exists(pbf_path):
-        print(f"Error: PBF file not found at {pbf_path}")
+        raise FileNotFoundError(
+            f"PBF file does not exist: {pbf_path}"
+        )
+
+    if not os.path.isfile(pbf_path):
+        raise ValueError(
+            f"PBF path is not a regular file: {pbf_path}"
+        )
+
+    if not os.access(pbf_path, os.R_OK):
+        raise PermissionError(
+            f"PBF file is not readable: {pbf_path}"
+        )
+
+    if not pbf_path.lower().endswith(
+        (".pbf", ".osm.pbf")
+    ):
+        raise ValueError(
+            f"Input does not appear to be an OSM PBF file: "
+            f"{pbf_path}"
+        )
+
+    file_size = os.path.getsize(pbf_path)
+
+    if file_size == 0:
+        raise ValueError(
+            f"PBF file is empty: {pbf_path}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+
+    # ------------------------------------------------------------------
+    # REQUIRE exactly one real PBF input.
+    # ------------------------------------------------------------------
+
+    if len(sys.argv) != 2:
+        print(
+            "ERROR: A real OpenStreetMap .osm.pbf file is required.",
+            file=sys.stderr,
+        )
+
+        print(
+            "\nUsage:",
+            file=sys.stderr,
+        )
+
+        print(
+            "  python scripts/import_osm.py "
+            "/path/to/real.osm.pbf",
+            file=sys.stderr,
+        )
+
+        sys.exit(2)
+
+    pbf_path = os.path.abspath(sys.argv[1])
+
+    # ------------------------------------------------------------------
+    # Validate input.
+    # ------------------------------------------------------------------
+
+    try:
+        validate_pbf_path(pbf_path)
+    except Exception as exc:
+        print(
+            f"ERROR: {exc}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    print(f"Processing OSM PBF file: {pbf_path}")
+    print("=" * 70)
+    print("REAL OSM ROAD IMPORT")
+    print("=" * 70)
 
-    # Ensure tables exist
-    Base.metadata.create_all(bind=engine)
+    print(f"Input PBF : {pbf_path}")
+    print(
+        f"File size : "
+        f"{os.path.getsize(pbf_path) / (1024 * 1024):.2f} MB"
+    )
 
-    # Clear old road segments for clean refresh
-    db = SessionLocal()
+    print(
+        f"Target segment length: "
+        f"{TARGET_SEGMENT_LENGTH_M:.0f} m"
+    )
+
+    print(
+        "Synthetic/fallback data: DISABLED"
+    )
+
+    print("=" * 70)
+
+    # ------------------------------------------------------------------
+    # Ensure database tables exist.
+    # ------------------------------------------------------------------
+
     try:
-        db.query(RoadSegment).delete()
-        db.commit()
-    finally:
-        db.close()
+        Base.metadata.create_all(
+            bind=engine
+        )
+    except Exception as exc:
+        print(
+            f"ERROR: Could not initialize database tables: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    # Extract roads with pyosmium
+    # ------------------------------------------------------------------
+    # Read actual OSM PBF.
+    # ------------------------------------------------------------------
+
     handler = RoadExtractorHandler()
-    idx = osmium.index.create_map("flex_mem")
-    lh = osmium.NodeLocationsForWays(idx)
-    lh.ignore_errors()
 
-    reader = osmium.io.Reader(pbf_path)
-    osmium.apply(reader, lh, handler)
-    reader.close()
-
-    print(f"Extracted {len(handler.roads)} road ways from OSM PBF.")
-
-    # Insert into database
-    db = SessionLocal()
     try:
-        segments_cnt, total_dist_m = segment_and_store_roads(handler.roads, db)
-        print(f"\n--- Import Complete ---")
-        print(f"Total Road Segments Inserted: {segments_cnt}")
-        print(f"Total Road Distance: {total_dist_m / 1000.0:.2f} km")
+        print("\nReading actual OpenStreetMap PBF...")
+
+        idx = osmium.index.create_map(
+            "flex_mem"
+        )
+
+        location_handler = osmium.NodeLocationsForWays(
+            idx
+        )
+
+        location_handler.ignore_errors()
+
+        reader = osmium.io.Reader(
+            pbf_path
+        )
+
+        try:
+            osmium.apply(
+                reader,
+                location_handler,
+                handler,
+            )
+        finally:
+            reader.close()
+
+    except Exception as exc:
+        print(
+            "\nERROR: Failed to read the OSM PBF.",
+            file=sys.stderr,
+        )
+
+        print(
+            f"Reason: {exc}",
+            file=sys.stderr,
+        )
+
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Print extraction statistics.
+    # ------------------------------------------------------------------
+
+    print("\n--- OSM Extraction ---")
+
+    print(
+        f"OSM Ways examined : "
+        f"{handler.ways_seen:,}"
+    )
+
+    print(
+        f"Road Ways retained: "
+        f"{handler.roads_kept:,}"
+    )
+
+    print(
+        f"Ways skipped      : "
+        f"{handler.roads_skipped:,}"
+    )
+
+    if not handler.roads:
+        print(
+            "\nERROR: No usable road Ways were found in "
+            "the supplied OSM PBF.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Open database session.
+    # ------------------------------------------------------------------
+
+    db = SessionLocal()
+
+    try:
+
+        # --------------------------------------------------------------
+        # Clear existing road segments.
+        #
+        # This is intentionally destructive for a clean re-import.
+        # --------------------------------------------------------------
+
+        print(
+            "\nRemoving existing RoadSegment records..."
+        )
+
+        db.query(
+            RoadSegment
+        ).delete(
+            synchronize_session=False
+        )
+
+        db.commit()
+
+        print(
+            "Existing RoadSegment records removed."
+        )
+
+        # --------------------------------------------------------------
+        # Segment and insert real OSM roads.
+        # --------------------------------------------------------------
+
+        print(
+            "\nSegmenting and storing actual OSM roads..."
+        )
+
+        segments_cnt, total_dist_m = (
+            segment_and_store_roads(
+                handler.roads,
+                db,
+            )
+        )
+
+        # --------------------------------------------------------------
+        # Final result.
+        # --------------------------------------------------------------
+
+        print("\n" + "=" * 70)
+        print("IMPORT COMPLETE")
+        print("=" * 70)
+
+        print(
+            f"OSM road Ways imported : "
+            f"{handler.roads_kept:,}"
+        )
+
+        print(
+            f"Road segments inserted : "
+            f"{segments_cnt:,}"
+        )
+
+        print(
+            f"Total road distance     : "
+            f"{total_dist_m / 1000.0:,.2f} km"
+        )
+
+        print(
+            "Data source             : "
+            "OpenStreetMap PBF supplied by user"
+        )
+
+        print(
+            "Synthetic road data     : "
+            "NONE"
+        )
+
+        print("=" * 70)
+
+    except Exception as exc:
+
+        # --------------------------------------------------------------
+        # Roll back if anything goes wrong during insertion.
+        # --------------------------------------------------------------
+
+        db.rollback()
+
+        print(
+            "\nERROR: Road import failed.",
+            file=sys.stderr,
+        )
+
+        print(
+            f"Reason: {exc}",
+            file=sys.stderr,
+        )
+
+        sys.exit(1)
+
     finally:
         db.close()
 
 
 if __name__ == "__main__":
     main()
+

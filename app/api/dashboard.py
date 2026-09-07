@@ -260,3 +260,37 @@ def get_risk_prioritized_weather_telemetry(db: Session = Depends(get_db)):
         "subtitle": "State-wise meteorological telemetry • Ranked by hazard severity index",
         "weather_cards": telemetry_cards
     }
+
+
+@router.post("/sync-and-reevaluate")
+def trigger_sync_and_reevaluate(db: Session = Depends(get_db)):
+    """
+    On-demand endpoint to trigger live feature updates, IMD weather grid sync,
+    and PostGIS risk score re-evaluations across all 1,390 road segments.
+    """
+    from scripts.sync_weather import sync_imd_weather_and_update_risks
+    from scripts.seed_features import seed_features_and_risks
+    from scripts.train_model import train_and_save_ml_model
+
+    # 1. Update feature vectors and baseline risk scores
+    seed_features_and_risks()
+
+    # 2. Sync IMD weather precipitation
+    sync_imd_weather_and_update_risks()
+
+    # 3. Retrain XGBoost model
+    train_and_save_ml_model()
+
+    # 4. Return updated statistics
+    total_segments = db.query(func.count(RoadSegment.segment_id)).scalar() or 0
+    at_risk_count = db.query(func.count(SegmentRisk.segment_id)).filter(
+        SegmentRisk.risk_category.in_(["HIGH", "CRITICAL"])
+    ).scalar() or 0
+
+    return {
+        "status": "SUCCESS",
+        "message": "Database feature vectors updated, IMD weather synced, risk scores re-evaluated, and XGBoost model retrained successfully.",
+        "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        "total_segments_evaluated": total_segments,
+        "roads_at_risk_count": at_risk_count
+    }

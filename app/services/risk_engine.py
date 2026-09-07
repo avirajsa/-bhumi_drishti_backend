@@ -7,64 +7,88 @@ def clamp(val: float, min_val: float = 0.0, max_val: float = 1.0) -> float:
 
 
 def compute_flood_hazard(feat: SegmentFeature) -> float:
-    # 24h rainfall contribution (up to 0.50)
-    rain_score = min(0.50, (feat.rainfall_24h_mm / 120.0) * 0.50)
+    flood_events = feat.flood_events_1y or 0
+    blockages = feat.blockages_1y or 0
+    rainfall_24h = feat.rainfall_24h_mm or 0.0
+    within_flood = feat.within_flood_zone or False
+    dist_river = feat.distance_to_river_m if feat.distance_to_river_m is not None else 500.0
+    flood_reports = feat.flood_reports_24h or 0
+
+    # 1. Historical Disaster Vulnerability Baseline (up to 0.35)
+    history_score = min(0.35, (flood_events * 0.15) + (blockages * 0.08))
+
+    # 2. 24h rainfall contribution (up to 0.30)
+    rain_score = min(0.30, (rainfall_24h / 120.0) * 0.30)
     
-    # Flood zone contribution (up to 0.25)
-    zone_score = 0.25 if feat.within_flood_zone else 0.0
+    # 3. Flood zone contribution (up to 0.20)
+    zone_score = 0.20 if within_flood else 0.0
     
-    # River proximity contribution (up to 0.15)
-    if feat.distance_to_river_m < 100:
-        river_score = 0.15
-    elif feat.distance_to_river_m < 300:
-        river_score = 0.08
+    # 4. River proximity contribution (up to 0.10)
+    if dist_river < 100:
+        river_score = 0.10
+    elif dist_river < 300:
+        river_score = 0.05
     else:
         river_score = 0.0
         
-    # Recent field reports contribution (up to 0.25)
-    report_score = min(0.25, feat.flood_reports_24h * 0.125)
+    # 5. Recent field reports contribution (up to 0.20)
+    report_score = min(0.20, flood_reports * 0.10)
 
-    total = rain_score + zone_score + river_score + report_score
+    total = history_score + rain_score + zone_score + river_score + report_score
     return round(clamp(total), 2)
 
 
 def compute_landslide_hazard(feat: SegmentFeature) -> float:
-    # Slope contribution (up to 0.40)
-    slope_score = min(0.40, (feat.slope_deg / 25.0) * 0.40)
-    
-    # Cumulative 72h rainfall contribution (up to 0.40)
-    rain_score = min(0.40, (feat.rainfall_72h_mm / 200.0) * 0.40)
-    
-    # Roughness contribution (up to 0.10)
-    rough_score = min(0.10, feat.terrain_roughness * 0.10)
-    
-    # Field reports contribution (up to 0.25)
-    report_score = min(0.25, feat.landslide_reports_24h * 0.125)
+    landslide_events = feat.landslide_events_1y or 0
+    blockages = feat.blockages_1y or 0
+    slope_deg = feat.slope_deg or 0.0
+    rainfall_72h = feat.rainfall_72h_mm or 0.0
+    roughness = feat.terrain_roughness or 0.0
+    landslide_reports = feat.landslide_reports_24h or 0
 
-    total = slope_score + rain_score + rough_score + report_score
+    # 1. Historical Landslide Vulnerability Baseline (up to 0.35)
+    history_score = min(0.35, (landslide_events * 0.15) + (blockages * 0.08))
+
+    # 2. Slope contribution (up to 0.25)
+    slope_score = min(0.25, (slope_deg / 25.0) * 0.25)
+    
+    # 3. Cumulative 72h rainfall contribution (up to 0.25)
+    rain_score = min(0.25, (rainfall_72h / 200.0) * 0.25)
+    
+    # 4. Roughness contribution (up to 0.10)
+    rough_score = min(0.10, roughness * 0.10)
+    
+    # 5. Field reports contribution (up to 0.20)
+    report_score = min(0.20, landslide_reports * 0.10)
+
+    total = history_score + slope_score + rain_score + rough_score + report_score
     return round(clamp(total), 2)
 
 
 def compute_road_damage_hazard(feat: SegmentFeature, segment: RoadSegment = None) -> float:
-    # Damage reports in past 30 days (up to 0.50)
-    damage_score = min(0.50, (feat.road_damage_reports_30d / 3.0) * 0.50)
+    blockages = feat.blockages_1y or 0
+    damage_reports = feat.road_damage_reports_30d or 0
+    construction = feat.construction_active or False
+
+    # 1. Historical Blockages & Past Reports (up to 0.40)
+    history_score = min(0.40, (blockages * 0.10) + (damage_reports / 3.0) * 0.30)
     
-    # Active construction (up to 0.30)
-    construction_score = 0.30 if feat.construction_active else 0.0
+    # 2. Active construction (up to 0.25)
+    construction_score = 0.25 if construction else 0.0
     
-    # Unpaved/dirt surface penalty (up to 0.20)
+    # 3. Unpaved/dirt surface penalty (up to 0.20)
     surface_score = 0.0
     if segment and segment.surface:
         s = segment.surface.lower()
         if s in ("unpaved", "dirt", "gravel", "earth", "ground"):
             surface_score = 0.20
 
-    total = damage_score + construction_score + surface_score
+    total = history_score + construction_score + surface_score
     return round(clamp(total), 2)
 
 
 def compute_congestion_hazard(feat: SegmentFeature) -> float:
-    total = clamp(feat.congestion_ratio)
+    total = clamp(feat.congestion_ratio or 0.0)
     return round(total, 2)
 
 
